@@ -20,6 +20,60 @@ struct Opt {
     log:String
 }
 
+
+
+
+
+
+fn block_ip_ingress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error>  {
+    let mut blocklist: HashMap<_, u32, u32> =
+    HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
+
+    let file = File::open(file_path).expect("there is no file");
+    for line in io::BufReader::new(file).lines() {
+        let ip_str = line?;
+        let ip: Ipv4Addr = ip_str.parse()?;
+        let ip_be = u32::from(ip).to_be();
+        blocklist.insert(ip_be, 0, 0)?;
+    }
+
+    println!("Contents of BLOCKLIST:");
+    for key in blocklist.keys() {
+        if let Ok(ip) = key {
+            let ip_host_order = u32::from_be(ip);
+            let ip_addr = Ipv4Addr::from(ip_host_order);
+            println!("{}", ip_addr);
+        }
+    }
+
+    Ok(())
+}
+
+fn block_ip_egress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error>  {
+    let mut blocklist: HashMap<_, u32, u32> =
+    HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
+
+    let file = File::open(file_path).expect("there is no file");
+    for line in io::BufReader::new(file).lines() {
+        let ip_str = line?;
+        let ip: Ipv4Addr = ip_str.parse()?;
+        let ip_be = u32::from(ip).to_be();
+        blocklist.insert(ip_be, 0, 0)?;
+    }
+
+    println!("Contents of BLOCKLIST egress:");
+    for key in blocklist.keys() {
+        if let Ok(ip) = key {
+            let ip_host_order = u32::from_be(ip);
+            let ip_addr = Ipv4Addr::from(ip_host_order);
+            println!("{}", ip_addr);
+        }
+    }
+
+    Ok(())
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
@@ -61,45 +115,20 @@ async fn main() -> Result<(), anyhow::Error> {
    //let program: &mut SchedClassifier = bpf.program_mut("tc_ringbuf").unwrap().try_into()?;
     let program: &mut SchedClassifier = bpf.program_mut("tc_hashmap").unwrap().try_into()?;
     program.load()?;
+
+    #[cfg(feature = "ingress")]
     program.attach(&opt.iface, TcAttachType::Ingress)?;
-   /*  let mut ring = RingBuf::try_from(bpf.map_mut("DATA").unwrap())?;
-    let _ = ring.readable_mut().await?;*/
-    let mut blocklist: HashMap<_, u32, u32> =
-    HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
+    #[cfg(feature = "egress")]
+    program.attach(&opt.iface, TcAttachType::Egress)?;
 
-    let file = File::open(&opt.file).expect("there is no file");
-    for line in io::BufReader::new(file).lines() {
-        let ip_str = line?;
-        let ip: Ipv4Addr = ip_str.parse()?;
-        let ip_be = u32::from(ip).to_be();
-        blocklist.insert(ip_be, 0, 0)?;
-    }
-// 
-println!("Contents of BLOCKLIST:");
-    for key in blocklist.keys() {
-        if let Ok(ip) = key {
-            let ip_host_order = u32::from_be(ip);
-            let ip_addr = Ipv4Addr::from(ip_host_order);
-            println!("{}", ip_addr);
-        }
-    }
-/*let block_addr: u32 = Ipv4Addr::new(1, 1, 1, 1).try_into()?;
-let block_addr_2: u32 = Ipv4Addr::new(192,168,1,5).try_into()?;
-
-// 
-
-blocklist.insert(block_addr, 0, 0)?;
-blocklist.insert(block_addr_2, 0, 0)?;*/
-
-   /* loop {
-         if let Some(item) = ring.next() {
-            info!("item: {:?}", &*item);
-        }
+    #[cfg(all(feature = "block_ip", feature = "ingress"))]
+    let _ = block_ip_ingress(& mut bpf,&opt.file);
+    
+    #[cfg(all(feature = "block_ip", feature = "egress"))]
+    let _ = block_ip_egress(&mut bpf,&opt.file);
 
 
-
-    }*/
-     info!("Waiting for Ctrl-C...");
+    info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
     info!("Exiting...");
 

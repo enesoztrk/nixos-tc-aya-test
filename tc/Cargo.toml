@@ -19,3 +19,9 @@ simplelog = "0.12"
 [[bin]]
 name = "tc-aya"
 path = "src/main.rs"
+
+
+[features]
+ingress = []
+egress = []
+block_ip = []

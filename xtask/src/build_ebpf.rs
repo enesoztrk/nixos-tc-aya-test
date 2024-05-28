@@ -38,6 +38,8 @@ pub struct Options {
     /// Build the release target
     #[clap(long)]
     pub release: bool,
+    #[clap(long)]
+    pub features: String,
 }
 
 pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
@@ -48,11 +50,18 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
         "--verbose",
         target.as_str(),
         "-Z",
-        "build-std=core",
+        "build-std=core"
     ];
     if opts.release {
         args.push("--release")
     }
+
+    if !opts.features.is_empty() {
+        args.push("--features");
+        args.push(&opts.features);
+    }
+
+
     let status = Command::new("cargo")
         .current_dir(&dir)
         .args(&args)

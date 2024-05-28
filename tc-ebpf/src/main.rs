@@ -15,6 +15,7 @@ use network_types::{
 };
 use aya_log_ebpf::info;
 use memoffset::offset_of;
+use core::net::Ipv4Addr;
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
@@ -31,17 +32,30 @@ static BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1000100, 0);
 
 #[classifier]
 pub fn tc_hashmap(ctx: TcContext) -> i32 {
-    match try_tc_hashmap(ctx) {
+#[cfg(all(feature = "block_ip", feature = "ingress"))]
+    match try_tc_ingress_blockip(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+#[cfg(all(feature = "block_ip", feature = "egress"))]
+    match try_tc_egress_blockip(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
 
-fn block_ip(address: u32) -> bool {
-    unsafe { BLOCKLIST.get(&address).is_some() }
+fn block_ip(ctx: &TcContext, address: u32) -> bool {
+    let result = unsafe { BLOCKLIST.get(&address).is_some() };
+    if result {
+        info!(ctx, "Address {} is in the blocklist", address);
+    } else {
+        info!(ctx, "Address {} is not in the blocklist", address);
+    }
+    
+    result
 }
-
-fn try_tc_hashmap(ctx: TcContext) -> Result<i32, i32> {
+#[cfg(all(feature = "block_ip", feature = "ingress"))]
+fn try_tc_ingress_blockip(ctx: TcContext) -> Result<i32, i32> {
     let ethhdr: EthHdr = ctx
     .load::<EthHdr>(0)
     .map_err(|_| TC_ACT_OK)?;
@@ -59,16 +73,53 @@ fn try_tc_hashmap(ctx: TcContext) -> Result<i32, i32> {
     .map_err(|_| TC_ACT_OK)?;
     let source = u32::from_be(ipv4hdr.src_addr);
 
-    let action = if block_ip(source) {
+    let action = if block_ip(&ctx,source) {
+        info!(&ctx, "Blocking packet to DEST {:i}", source);
         TC_ACT_SHOT
     } else {
+        info!(&ctx, "Allowing packet to DEST {:i}", source);
         TC_ACT_PIPE
     };
 
-    info!(&ctx, "DEST {:i}, ACTION {}", source, action);
+    info!(&ctx, "Ingress-DEST {:i}, ACTION {}", source, action);
 
     Ok(action)
 }
+
+
+
+#[cfg(all(feature = "block_ip", feature = "egress"))]
+fn try_tc_egress_blockip(ctx: TcContext) -> Result<i32, i32> {
+    let ethhdr: EthHdr = ctx
+    .load::<EthHdr>(0)
+    .map_err(|_| TC_ACT_OK)?;
+
+
+   // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    match ethhdr.ether_type {
+        EtherType::Ipv4 => {}
+        _ => return Ok(TC_ACT_PIPE),
+    }
+
+    //let ipv4hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
+    let ipv4hdr: Ipv4Hdr = ctx
+    .load::<Ipv4Hdr>(EthHdr::LEN)
+    .map_err(|_| TC_ACT_OK)?;
+    let dest = u32::from_be(ipv4hdr.dst_addr);
+
+    let action = if block_ip(&ctx,dest) {
+        info!(&ctx, "Blocking packet to DEST {:i}", dest);
+        TC_ACT_SHOT
+    } else {
+        info!(&ctx, "Allowing packet to DEST {:i}", dest);
+        TC_ACT_PIPE
+    };
+    info!(&ctx, "egress-DEST {:i}, ACTION {}", dest, action);
+
+    Ok(action)
+}
+
+
 
 /* #[classifier]
 pub fn tc(ctx: TcContext) -> i32 {
