@@ -37,12 +37,12 @@ fn block_ip_ingress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error>
         blocklist.insert(ip_be, 0, 0)?;
     }
 
-    println!("Contents of BLOCKLIST:");
+    info!("Contents of BLOCKLIST:");
     for key in blocklist.keys() {
         if let Ok(ip) = key {
             let ip_host_order = u32::from_be(ip);
             let ip_addr = Ipv4Addr::from(ip_host_order);
-            println!("{}", ip_addr);
+            info!("{}", ip_addr);
         }
     }
 
@@ -61,12 +61,12 @@ fn block_ip_egress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error> 
         blocklist.insert(ip_be, 0, 0)?;
     }
 
-    println!("Contents of BLOCKLIST egress:");
+    info!("Contents of BLOCKLIST egress:");
     for key in blocklist.keys() {
         if let Ok(ip) = key {
             let ip_host_order = u32::from_be(ip);
             let ip_addr = Ipv4Addr::from(ip_host_order);
-            println!("{}", ip_addr);
+            info!("{}", ip_addr);
         }
     }
 
