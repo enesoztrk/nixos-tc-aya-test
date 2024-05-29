@@ -45,14 +45,8 @@ pub fn tc_hashmap(ctx: TcContext) -> i32 {
 }
 
 fn block_ip(ctx: &TcContext, address: u32) -> bool {
-    let result = unsafe { BLOCKLIST.get(&address).is_some() };
-    if result {
-        info!(ctx, "Address {} is in the blocklist", address);
-    } else {
-        info!(ctx, "Address {} is not in the blocklist", address);
-    }
-    
-    result
+   unsafe { BLOCKLIST.get(&address).is_some() }
+   
 }
 #[cfg(all(feature = "block_ip", feature = "ingress"))]
 fn try_tc_ingress_blockip(ctx: TcContext) -> Result<i32, i32> {
@@ -73,15 +67,15 @@ fn try_tc_ingress_blockip(ctx: TcContext) -> Result<i32, i32> {
     .map_err(|_| TC_ACT_OK)?;
     let source = u32::from_be(ipv4hdr.src_addr);
 
-    let action = if block_ip(&ctx,source) {
+    let action = if block_ip(&ctx,ipv4hdr.src_addr) {
         info!(&ctx, "Blocking packet to DEST {:i}", source);
         TC_ACT_SHOT
     } else {
-        info!(&ctx, "Allowing packet to DEST {:i}", source);
+     //   info!(&ctx, "Allowing packet to DEST {:i}", source);
         TC_ACT_PIPE
     };
 
-    info!(&ctx, "Ingress-DEST {:i}, ACTION {}", source, action);
+    //info!(&ctx, "Ingress-DEST {:i}, ACTION {}", source, action);
 
     Ok(action)
 }
@@ -107,7 +101,7 @@ fn try_tc_egress_blockip(ctx: TcContext) -> Result<i32, i32> {
     .map_err(|_| TC_ACT_OK)?;
     let dest = u32::from_be(ipv4hdr.dst_addr);
 
-    let action = if block_ip(&ctx,dest) {
+    let action = if block_ip(&ctx,ipv4hdr.dst_addr) {
         info!(&ctx, "Blocking packet to DEST {:i}", dest);
         TC_ACT_SHOT
     } else {
