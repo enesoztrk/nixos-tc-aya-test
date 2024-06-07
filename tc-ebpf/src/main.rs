@@ -11,11 +11,18 @@ use aya_ebpf::{
 };
 use network_types::{
     eth::{EthHdr, EtherType},
-    ip::Ipv4Hdr,
+    ip::{Ipv4Hdr},
+    
 };
+
+use network_types::*;
 use aya_log_ebpf::info;
 use memoffset::offset_of;
 use core::net::Ipv4Addr;
+
+use aya_ebpf::bpf_printk;
+use aya_ebpf::helpers::{bpf_redirect, bpf_sk_redirect_hash};
+
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
@@ -37,6 +44,11 @@ pub fn tc_hashmap(ctx: TcContext) -> i32 {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
+#[cfg(all(feature = "redirect", feature = "ingress"))]
+    match try_tc_ingress_redirect(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
 #[cfg(all(feature = "block_ip", feature = "egress"))]
     match try_tc_egress_blockip(ctx) {
         Ok(ret) => ret,
@@ -50,10 +62,11 @@ fn block_ip(ctx: &TcContext, address: u32) -> bool {
 }
 #[cfg(all(feature = "block_ip", feature = "ingress"))]
 fn try_tc_ingress_blockip(ctx: TcContext) -> Result<i32, i32> {
+
     let ethhdr: EthHdr = ctx
     .load::<EthHdr>(0)
     .map_err(|_| TC_ACT_OK)?;
-
+info!(&ctx, "Ingress redirect");
 
    // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
     match ethhdr.ether_type {
@@ -113,25 +126,69 @@ fn try_tc_egress_blockip(ctx: TcContext) -> Result<i32, i32> {
     Ok(action)
 }
 
+#[cfg(all(feature = "redirect", feature = "ingress"))]
+fn try_tc_ingress_redirect(mut ctx: TcContext) -> Result<i32, i32> {
+    // Assuming you have defined EthHdr, EtherType, Ipv4Hdr, and IcmpHdr somewhere
+
+    let ethhdr: EthHdr = ctx
+    .load::<EthHdr>(0)
+    .map_err(|_| TC_ACT_OK)?;
+info!(&ctx, "Ingress redirect");
 
 
-/* #[classifier]
-pub fn tc(ctx: TcContext) -> i32 {
-    match  { try_tc(ctx) } {
-        Ok(ret) => ret,
-        Err(ret) => ret,
+   // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    match ethhdr.ether_type {
+        EtherType::Ipv4 => {}
+        _ => return Ok(TC_ACT_PIPE),
     }
+    let ipv4hdr: Ipv4Hdr = ctx
+    .load::<Ipv4Hdr>(EthHdr::LEN)
+    .map_err(|_| TC_ACT_OK)?;
+    let source = u32::from_be(ipv4hdr.src_addr);
+    let dest = u32::from_be(ipv4hdr.dst_addr);
+
+    info!(&ctx, "Incoming packet {:i} -> {:i}", source,dest);
+
+
+        let ip_proto = ctx
+        .load::<u8>(ETH_HDR_LEN + offset_of!(iphdr, protocol))
+        .map_err(|_| TC_ACT_OK)?;
+    
+
+        if  ip_proto == IPPROTO_ICMP  {
+
+             // Change destination MAC address to a new one
+             let new_dest_mac:[u8; 6] = [0x08,0x00,0x27,0xdb,0xad,0xc7];
+             ctx.store(0, &new_dest_mac,BPF_F_RECOMPUTE_CSUM.into()).map_err(|_| TC_ACT_OK)?;
+ 
+
+
+            // Change destination IP address to a new one
+            let new_dest_ip =u32::from_be_bytes([192,168,56,6]);
+            ctx.store(
+                ETH_HDR_LEN + offset_of!(Ipv4Hdr, dst_addr),
+                &new_dest_ip,
+                BPF_F_RECOMPUTE_CSUM.into(),
+            )
+            .map_err(|_| TC_ACT_OK)?;
+           
+            // Log the changes using info! macro
+            info!(&ctx, "Redirecting ICMP packet: IP: {:i} MAC: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}", 
+                new_dest_ip,
+                new_dest_mac[0], new_dest_mac[1], new_dest_mac[2], new_dest_mac[3], new_dest_mac[4], new_dest_mac[5]);
+
+            // Redirect the packet to interface enp0s8
+            unsafe {
+                bpf_redirect(3, 0);
+            }
+        }
+    
+
+    Ok(TC_ACT_PIPE)
 }
 
-#[classifier(name = "tc_ringbuf")]
-pub fn tc_ringbuf(ctx: TcContext) -> i32 {
-    match try_tc_ringbuf(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
 
-fn try_tc_ringbuf(ctx: TcContext) -> Result<i32, i32> {
+/* fn try_tc_ringbuf(ctx: TcContext) -> Result<i32, i32> {
     // info!(&ctx, "received a packet");
 
     // TODO(vaodorvsky): This should be faster, but sadly it's annoying the

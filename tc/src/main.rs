@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{self, BufRead};
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "enp0s3")]
+    #[clap(short, long, default_value = "enp0s8")]
     iface: String,
     #[clap(long)]
     file: String,
@@ -26,6 +26,7 @@ struct Opt {
 
 
 fn block_ip_ingress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error>  {
+    info!("block_ip_ingress");
     let mut blocklist: HashMap<_, u32, u32> =
     HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
 
@@ -115,6 +116,7 @@ async fn main() -> Result<(), anyhow::Error> {
    //let program: &mut SchedClassifier = bpf.program_mut("tc_ringbuf").unwrap().try_into()?;
     let program: &mut SchedClassifier = bpf.program_mut("tc_hashmap").unwrap().try_into()?;
     program.load()?;
+    info!("block_ip_ingreklşkss");
 
     #[cfg(feature = "ingress")]
     program.attach(&opt.iface, TcAttachType::Ingress)?;
