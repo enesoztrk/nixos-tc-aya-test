@@ -2,7 +2,7 @@
 
 
 #!/bin/bash
-
+rm -rf target
 # Default values
 hook="ingress"
 build_type="debug"
@@ -40,11 +40,16 @@ done
 
 # Shift to get rid of the parsed options
 shift $((OPTIND -1))
-
 # Now you can use $hook, $build_type, and $program_type variables as needed
 echo "Hook: $hook"
 echo "Build type: $build_type"
 echo "Program type: $program_type"
+
+./build.sh -k $hook -b $build_type -p $program_type
+sudo ./target/$build_type/tc-aya --log "$log" --file "$file" 
+
+exit 0
+
 
  
 # Run cargo commands with options

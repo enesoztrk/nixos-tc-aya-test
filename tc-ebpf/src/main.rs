@@ -38,6 +38,42 @@ use bindings::{ethhdr, iphdr, ipv6hdr};
 static BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1000100, 0);
 
 #[classifier]
+pub fn tc_test(ctx: TcContext) -> i32 {
+    match try_tc_enp0s8(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_tc_enp0s8(ctx: TcContext) -> Result<i32, i32>{
+    let ethhdr: EthHdr = ctx
+    .load::<EthHdr>(0)
+    .map_err(|_| TC_ACT_OK)?;
+
+
+   // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    match ethhdr.ether_type {
+        EtherType::Ipv4 => {}
+        _ => return Ok(TC_ACT_PIPE),
+    }
+    let ipv4hdr: Ipv4Hdr = ctx
+    .load::<Ipv4Hdr>(EthHdr::LEN)
+    .map_err(|_| TC_ACT_OK)?;
+    let source = u32::from_be(ipv4hdr.src_addr);
+    let dest = u32::from_be(ipv4hdr.dst_addr);
+
+    //info!(&ctx, "enp0s8-Incoming ICMP packet {:i} -> {:i}", source,dest);
+    let ip_proto = ctx
+    .load::<u8>(ETH_HDR_LEN + offset_of!(iphdr, protocol))
+    .map_err(|_| TC_ACT_OK)?;
+    if  ip_proto == IPPROTO_ICMP  {
+        info!(&ctx, "enp0s8-Incoming ICMP packet {:i} -> {:i}", source,dest);
+    }
+    Ok(TC_ACT_PIPE)
+}
+
+
+#[classifier]
 pub fn tc_hashmap(ctx: TcContext) -> i32 {
 #[cfg(all(feature = "block_ip", feature = "ingress"))]
     match try_tc_ingress_blockip(ctx) {
@@ -133,7 +169,6 @@ fn try_tc_ingress_redirect(mut ctx: TcContext) -> Result<i32, i32> {
     let ethhdr: EthHdr = ctx
     .load::<EthHdr>(0)
     .map_err(|_| TC_ACT_OK)?;
-info!(&ctx, "Ingress redirect");
 
 
    // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
@@ -147,7 +182,7 @@ info!(&ctx, "Ingress redirect");
     let source = u32::from_be(ipv4hdr.src_addr);
     let dest = u32::from_be(ipv4hdr.dst_addr);
 
-    info!(&ctx, "Incoming packet {:i} -> {:i}", source,dest);
+    //info!(&ctx, "Incoming packet {:i} -> {:i}", source,dest);
 
 
         let ip_proto = ctx
@@ -156,30 +191,34 @@ info!(&ctx, "Ingress redirect");
     
 
         if  ip_proto == IPPROTO_ICMP  {
+            info!(&ctx, "Incoming ICMP packet {:i} -> {:i}", source,dest);
 
              // Change destination MAC address to a new one
              let new_dest_mac:[u8; 6] = [0x08,0x00,0x27,0xdb,0xad,0xc7];
-             ctx.store(0, &new_dest_mac,BPF_F_RECOMPUTE_CSUM.into()).map_err(|_| TC_ACT_OK)?;
+             ctx.store(0, &new_dest_mac,/*BPF_F_RECOMPUTE_CSUM.into()*/0).map_err(|_| TC_ACT_OK)?;
  
 
 
             // Change destination IP address to a new one
-            let new_dest_ip =u32::from_be_bytes([192,168,56,6]);
+            let new_dest_ip =u32::from_le_bytes([192,168,56,6]);
             ctx.store(
                 ETH_HDR_LEN + offset_of!(Ipv4Hdr, dst_addr),
                 &new_dest_ip,
-                BPF_F_RECOMPUTE_CSUM.into(),
+               0,
             )
             .map_err(|_| TC_ACT_OK)?;
            
             // Log the changes using info! macro
-            info!(&ctx, "Redirecting ICMP packet: IP: {:i} MAC: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}", 
-                new_dest_ip,
-                new_dest_mac[0], new_dest_mac[1], new_dest_mac[2], new_dest_mac[3], new_dest_mac[4], new_dest_mac[5]);
+          
 
             // Redirect the packet to interface enp0s8
             unsafe {
-                bpf_redirect(3, 0);
+                info!(&ctx, "Redirecting ICMP packet: IP: {:i} MAC: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}", 
+                new_dest_ip,
+                new_dest_mac[0], new_dest_mac[1], new_dest_mac[2], new_dest_mac[3], new_dest_mac[4], new_dest_mac[5]);
+                let result = unsafe { bpf_redirect(3, 0) };
+                info!(&ctx,"result {}",result);
+                return Ok(result as i32 );
             }
         }
     

@@ -12,8 +12,10 @@ use std::fs::File;
 use std::io::{self, BufRead};
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "enp0s8")]
+    #[clap(short, long, default_value = "enp0s3")]
     iface: String,
+    #[clap(short, long, default_value = "enp0s8")]
+    iface_2: String,
     #[clap(long)]
     file: String,
     #[clap(long)]
@@ -74,6 +76,14 @@ fn block_ip_egress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error> 
     Ok(())
 }
 
+// Function to load the "tc_hashmap" program
+fn load_tc_program(bpf: &mut Bpf,program_name:&str,if_name:&str,attach_type:TcAttachType) -> Result<(), anyhow::Error> {
+    let program: &mut SchedClassifier = bpf.program_mut(program_name).unwrap().try_into()?;
+    program.load()?;
+    program.attach(if_name, attach_type)?;
+    Ok(())
+}
+
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -112,16 +122,23 @@ async fn main() -> Result<(), anyhow::Error> {
     }    // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&opt.iface);
+    let _ = tc::qdisc_add_clsact(&opt.iface_2);
+
    // let program: &mut SchedClassifier = bpf.program_mut("tc").unwrap().try_into()?;
    //let program: &mut SchedClassifier = bpf.program_mut("tc_ringbuf").unwrap().try_into()?;
-    let program: &mut SchedClassifier = bpf.program_mut("tc_hashmap").unwrap().try_into()?;
-    program.load()?;
-    info!("block_ip_ingreklşkss");
+ // Load "tc_hashmap" program
+ load_tc_program(&mut bpf,"tc_hashmap",&opt.iface,TcAttachType::Ingress)?;
 
-    #[cfg(feature = "ingress")]
+ // Load "tc_test" program
+ load_tc_program(&mut bpf,"tc_test",&opt.iface_2,TcAttachType::Ingress)?;
+
+   /*  #[cfg(feature = "ingress")]
     program.attach(&opt.iface, TcAttachType::Ingress)?;
     #[cfg(feature = "egress")]
     program.attach(&opt.iface, TcAttachType::Egress)?;
+*/
+
+
 
     #[cfg(all(feature = "block_ip", feature = "ingress"))]
     let _ = block_ip_ingress(& mut bpf,&opt.file);

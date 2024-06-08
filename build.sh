@@ -1,5 +1,5 @@
 #!/bin/bash
-
+rm -rf target/
 # Default values
 hook="ingress"
 build_type="debug"
