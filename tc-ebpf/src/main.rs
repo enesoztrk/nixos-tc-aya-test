@@ -21,7 +21,7 @@ use memoffset::offset_of;
 use core::net::Ipv4Addr;
 
 use aya_ebpf::bpf_printk;
-use aya_ebpf::helpers::{bpf_redirect, bpf_sk_redirect_hash};
+use aya_ebpf::helpers::{bpf_redirect, bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace};
 
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
@@ -36,6 +36,74 @@ use bindings::{ethhdr, iphdr, ipv6hdr};
 //static DATA: RingBuf = RingBuf::with_max_entries(256 * 1024, 0); // 256 KB
 #[map]
 static BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1000100, 0);
+
+
+// Helper function to check if two IPs are in the same network
+fn same_network(ip1: u32, ip2: u32) -> bool {
+     // Define the network mask (e.g., /24)
+     let network_mask = 0xFFFFFF00; // 255.255.255.0
+    (ip1 & network_mask) == (ip2 & network_mask)
+}
+
+#[classifier]
+pub fn tc_masquerade(ctx: TcContext) -> i32 {
+    match try_masquerade(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_masquerade(mut ctx: TcContext) -> Result<i32, i32>{
+    let ethhdr: EthHdr = ctx
+    .load::<EthHdr>(0)
+    .map_err(|_| TC_ACT_OK)?;
+
+
+   // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    match ethhdr.ether_type {
+        EtherType::Ipv4 => {}
+        _ => return Ok(TC_ACT_PIPE),
+    }
+    let ipv4hdr: Ipv4Hdr = ctx
+    .load::<Ipv4Hdr>(EthHdr::LEN)
+    .map_err(|_| TC_ACT_OK)?;
+    let source = u32::from_be(ipv4hdr.src_addr);
+    let dest = u32::from_be(ipv4hdr.dst_addr);
+
+    //info!(&ctx, "enp0s8-Incoming ICMP packet {:i} -> {:i}", source,dest);
+    let ip_proto = ctx
+    .load::<u8>(ETH_HDR_LEN + offset_of!(iphdr, protocol))
+    .map_err(|_| TC_ACT_OK)?;
+    if  ip_proto == IPPROTO_ICMP  && !same_network(source,EXTERNAL_IP) {
+        info!(&ctx, "enp0s3-Outgoing ICMP packet {:i} -> {:i}", source,dest);
+            // Change destination MAC address to a new one
+            let new_src_mac:[u8; 6] = [0x08,0x00,0x27,0x10,0xe7,0x06];
+            ctx.store(offset_of!(EthHdr, src_addr), &new_src_mac,BPF_F_RECOMPUTE_CSUM.into()).map_err(|_| TC_ACT_OK)?;
+
+
+
+           // Change destination IP address to a new one
+           let new_src_ip =EXTERNAL_IP;
+           ctx.store(
+               ETH_HDR_LEN + offset_of!(Ipv4Hdr, src_addr),
+               &new_src_ip,
+               BPF_F_RECOMPUTE_CSUM.into(),
+           )
+           .map_err(|_| TC_ACT_OK)?;
+          
+           // Update the checksum using bpf_l3_csum_replace
+           let skb = ctx.skb.skb;
+   let offset = (ETH_HDR_LEN + offset_of!(Ipv4Hdr, check)) as u32;
+   let from = ipv4hdr.src_addr as u64;
+   let to = new_src_ip as u64;
+   let size = 4; // IPv4 addresses are 4 bytes
+
+   if unsafe{bpf_l3_csum_replace(skb, offset, from, to, size)} != 0 {
+       return Err(TC_ACT_OK);
+   }
+    }
+    Ok(TC_ACT_PIPE)
+}
 
 #[classifier]
 pub fn tc_test(ctx: TcContext) -> i32 {
@@ -194,29 +262,37 @@ fn try_tc_ingress_redirect(mut ctx: TcContext) -> Result<i32, i32> {
             info!(&ctx, "Incoming ICMP packet {:i} -> {:i}", source,dest);
 
              // Change destination MAC address to a new one
-             let new_dest_mac:[u8; 6] = [0x08,0x00,0x27,0xdb,0xad,0xc7];
-             ctx.store(0, &new_dest_mac,/*BPF_F_RECOMPUTE_CSUM.into()*/0).map_err(|_| TC_ACT_OK)?;
+             let new_dest_mac:[u8; 6] = [0x08,0x00,0x27,0xe7,0x3e,0xdb];
+             ctx.store(0, &new_dest_mac,BPF_F_RECOMPUTE_CSUM.into()).map_err(|_| TC_ACT_OK)?;
  
 
 
             // Change destination IP address to a new one
-            let new_dest_ip =u32::from_le_bytes([192,168,56,6]);
+            let new_dest_ip =u32::from_le_bytes([192,168,58,101]);
             ctx.store(
                 ETH_HDR_LEN + offset_of!(Ipv4Hdr, dst_addr),
                 &new_dest_ip,
-               0,
+                BPF_F_RECOMPUTE_CSUM.into(),
             )
             .map_err(|_| TC_ACT_OK)?;
            
-            // Log the changes using info! macro
-          
+            // Update the checksum using bpf_l3_csum_replace
+            let skb = ctx.skb.skb;
+    let offset = (ETH_HDR_LEN + offset_of!(Ipv4Hdr, check)) as u32;
+    let from = ipv4hdr.dst_addr as u64;
+    let to = new_dest_ip as u64;
+    let size = 4; // IPv4 addresses are 4 bytes
+
+    if unsafe{bpf_l3_csum_replace(skb, offset, from, to, size)} != 0 {
+        return Err(TC_ACT_OK);
+    }
 
             // Redirect the packet to interface enp0s8
             unsafe {
                 info!(&ctx, "Redirecting ICMP packet: IP: {:i} MAC: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}", 
                 new_dest_ip,
                 new_dest_mac[0], new_dest_mac[1], new_dest_mac[2], new_dest_mac[3], new_dest_mac[4], new_dest_mac[5]);
-                let result = unsafe { bpf_redirect(3, 0) };
+                let result = unsafe { bpf_redirect(4, 0) };
                 info!(&ctx,"result {}",result);
                 return Ok(result as i32 );
             }
@@ -340,7 +416,8 @@ const ETH_P_IP: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_ARP: u16 = 0x0806;
 const IPPROTO_ICMP: u8 = 1; // ICMP protocol number
-
+const EXTERNAL_IP:u32 = u32::from_le_bytes([192,168,1,11]);
+const INTERNAL_IP:u32 = u32::from_le_bytes([192,168,58,1]);
 const ETH_HDR_LEN: usize = mem::size_of::<ethhdr>();
 
 #[panic_handler]

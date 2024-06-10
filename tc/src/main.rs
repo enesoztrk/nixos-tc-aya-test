@@ -1,3 +1,4 @@
+use aya::programs::tc::TcOptions;
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
@@ -12,9 +13,9 @@ use std::fs::File;
 use std::io::{self, BufRead};
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "enp0s3")]
+    #[clap(long, default_value = "enp0s3")]
     iface: String,
-    #[clap(short, long, default_value = "enp0s8")]
+    #[clap(long, default_value = "enp0s8")]
     iface_2: String,
     #[clap(long)]
     file: String,
@@ -78,9 +79,11 @@ fn block_ip_egress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error> 
 
 // Function to load the "tc_hashmap" program
 fn load_tc_program(bpf: &mut Bpf,program_name:&str,if_name:&str,attach_type:TcAttachType) -> Result<(), anyhow::Error> {
+   let opts:TcOptions = TcOptions{
+                                  priority: 1,handle: 0};
     let program: &mut SchedClassifier = bpf.program_mut(program_name).unwrap().try_into()?;
     program.load()?;
-    program.attach(if_name, attach_type)?;
+    program.attach_with_options(if_name, attach_type,opts)?;
     Ok(())
 }
 
@@ -122,7 +125,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }    // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&opt.iface);
-    let _ = tc::qdisc_add_clsact(&opt.iface_2);
+    //let _ = tc::qdisc_add_clsact(&opt.iface_2);
 
    // let program: &mut SchedClassifier = bpf.program_mut("tc").unwrap().try_into()?;
    //let program: &mut SchedClassifier = bpf.program_mut("tc_ringbuf").unwrap().try_into()?;
@@ -130,7 +133,9 @@ async fn main() -> Result<(), anyhow::Error> {
  load_tc_program(&mut bpf,"tc_hashmap",&opt.iface,TcAttachType::Ingress)?;
 
  // Load "tc_test" program
- load_tc_program(&mut bpf,"tc_test",&opt.iface_2,TcAttachType::Ingress)?;
+ //load_tc_program(&mut bpf,"tc_test",&opt.iface_2,TcAttachType::Ingress)?;
+ 
+ load_tc_program(&mut bpf,"tc_masquerade",&opt.iface,TcAttachType::Egress)?;
 
    /*  #[cfg(feature = "ingress")]
     program.attach(&opt.iface, TcAttachType::Ingress)?;
@@ -140,12 +145,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
 
 
-    #[cfg(all(feature = "block_ip", feature = "ingress"))]
+   /*  #[cfg(all(feature = "block_ip", feature = "ingress"))]
     let _ = block_ip_ingress(& mut bpf,&opt.file);
     
     #[cfg(all(feature = "block_ip", feature = "egress"))]
     let _ = block_ip_egress(&mut bpf,&opt.file);
-
+*/
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
