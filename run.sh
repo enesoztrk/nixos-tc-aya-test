@@ -10,7 +10,7 @@ program_type="block_ip"
 log="true"
 file="file.txt"
 #cargo xtask run -- $1 $2 $3 $4
-
+#sudo route del -net 192.168.58.0 gw 0.0.0.0 netmask 255.255.255.0 dev enp0s3
 # Function to display usage information
 usage() {
     echo "Usage: $0 [-h] [-k hook] [-b build_type] [-p program_type]"
@@ -45,8 +45,8 @@ echo "Hook: $hook"
 echo "Build type: $build_type"
 echo "Program type: $program_type"
 
-./build.sh -k $hook -b $build_type -p $program_type
-sudo ./target/$build_type/tc-aya --log "$log" --file "$file" 
+./build.sh -k $hook -b $build_type -p $program_type || exit 1
+sudo ./target/$build_type/tc-aya --log "$log" --file "$file"  || exit 1
 
 exit 0
 

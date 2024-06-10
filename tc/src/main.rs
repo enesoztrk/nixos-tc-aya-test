@@ -83,7 +83,7 @@ fn load_tc_program(bpf: &mut Bpf,program_name:&str,if_name:&str,attach_type:TcAt
                                   priority: 1,handle: 0};
     let program: &mut SchedClassifier = bpf.program_mut(program_name).unwrap().try_into()?;
     program.load()?;
-    program.attach_with_options(if_name, attach_type,opts)?;
+    program.attach(if_name, attach_type)?;
     Ok(())
 }
 
