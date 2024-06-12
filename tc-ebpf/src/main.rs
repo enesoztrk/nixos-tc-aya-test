@@ -12,8 +12,8 @@ use aya_ebpf::{
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{Ipv4Hdr},
-    udp::UdpHdr
-    
+    udp::UdpHdr,
+    icmp::IcmpHdr
 };
 
 use network_types::*;
@@ -75,7 +75,7 @@ fn try_masquerade(mut ctx: TcContext) -> Result<i32, i32>{
     let ip_proto = ctx
     .load::<u8>(ETH_HDR_LEN + offset_of!(iphdr, protocol))
     .map_err(|_| TC_ACT_OK)?;
-    if ip_proto==IPPROTO_UDP  && !same_network(source,EXTERNAL_IP) {
+    if  !same_network(source,EXTERNAL_IP) {
 
 
  
@@ -96,19 +96,27 @@ fn try_masquerade(mut ctx: TcContext) -> Result<i32, i32>{
            )
            .map_err(|_| TC_ACT_OK)?;
           
-           let offset = (ETH_HDR_LEN + IP_HDR_LEN + offset_of!(UdpHdr, check)) as u32;
+           let offset = match ip_proto {
+            IPPROTO_UDP => (ETH_HDR_LEN + IP_HDR_LEN + offset_of!(UdpHdr, check)) as u32,
+            IPPROTO_ICMP => (ETH_HDR_LEN + IP_HDR_LEN + offset_of!(IcmpHdr, checksum)) as u32,
+            _ => return  Ok(TC_ACT_SHOT), // Default value for other protocols
+        };
+
            let skb = ctx.skb.skb;
            let from = ipv4hdr.src_addr as u64;
            let to = new_src_ip as u64;
            let size = 4; // IPv4 addresses are 4 bytes
            //
-           let ret = unsafe{bpf_l4_csum_replace(skb, offset, from, to,
-               (BPF_F_MARK_MANGLED_0 |BPF_F_PSEUDO_HDR | 4).into())};
-
-               if ret != 0{
-                   error!(&ctx, "l4 csum replace err:{}",ret );
-                   return Err(TC_ACT_OK);
-               }
+           if IPPROTO_UDP ==ip_proto{
+            let ret = unsafe{bpf_l4_csum_replace(skb, offset, from, to,
+                (BPF_F_MARK_MANGLED_0 |BPF_F_PSEUDO_HDR | 4).into())};
+ 
+                if ret != 0{
+                    error!(&ctx, "l4 csum replace err:{}",ret );
+                    return Err(TC_ACT_OK);
+                }
+           }
+          
            // Update the checksum using bpf_l3_csum_replace
           
            let offset = (ETH_HDR_LEN + offset_of!(Ipv4Hdr, check)) as u32;
@@ -283,19 +291,24 @@ fn try_tc_ingress_redirect(mut ctx: TcContext) -> Result<i32, i32> {
         .map_err(|_| TC_ACT_OK)?;
    
 
-        if  ip_proto == IPPROTO_UDP  {
-            let udphdr: UdpHdr = ctx
-            .load::<UdpHdr>(EthHdr::LEN +Ipv4Hdr::LEN)
-            .map_err(|_| TC_ACT_OK)?;
+        if  ip_proto == IPPROTO_UDP || ip_proto == IPPROTO_ICMP {
+       
+        
+        if ip_proto == IPPROTO_UDP {
+            // Handle UDP packets
+            let udphdr: UdpHdr = ctx.load::<UdpHdr>(EthHdr::LEN + Ipv4Hdr::LEN).map_err(|_| TC_ACT_OK)?;
+            info!(&ctx, "Incoming UDP packet {:i} :{} -> {:i}:{}", source, u16::from_be(udphdr.source), dest, u16::from_be(udphdr.dest));
             
-
-            info!(&ctx, "Incoming UDP packet {:i} :{} -> {:i}:{}", source, u16::from_be(udphdr.source),dest,u16::from_be(udphdr.dest));
-
-
-            if u16::from_be(udphdr.dest) != 12345{
+            if u16::from_be(udphdr.dest) != 12345 {
                 return Ok(TC_ACT_PIPE);
-            }  
+            }
+        } else if ip_proto == IPPROTO_ICMP {
+            // Handle ICMP packets
+            let icmphdr: IcmpHdr = ctx.load::<IcmpHdr>(EthHdr::LEN + Ipv4Hdr::LEN).map_err(|_| TC_ACT_OK)?;
+            info!(&ctx, "Incoming ICMP packet {:i} -> {:i}", source, dest);
+        }
 
+        
             
              // Change destination MAC address to a new one
              let new_dest_mac:[u8; 6] = [0x08,0x00,0x27,0xe7,0x3e,0xdb];
@@ -312,19 +325,29 @@ fn try_tc_ingress_redirect(mut ctx: TcContext) -> Result<i32, i32> {
             )
             .map_err(|_| TC_ACT_OK)?;
            
-            let offset = (ETH_HDR_LEN + IP_HDR_LEN + offset_of!(UdpHdr, check)) as u32;
+            let offset = match ip_proto {
+                IPPROTO_UDP => (ETH_HDR_LEN + IP_HDR_LEN + offset_of!(UdpHdr, check)) as u32,
+                IPPROTO_ICMP => (ETH_HDR_LEN + IP_HDR_LEN + offset_of!(IcmpHdr, checksum)) as u32,
+                _ => return  Ok(TC_ACT_PIPE), // Default value for other protocols
+            };
+
+
             let skb = ctx.skb.skb;
             let from = ipv4hdr.dst_addr as u64;
             let to = new_dest_ip as u64;
             let size = 4; // IPv4 addresses are 4 bytes
             //
-            let ret = unsafe{bpf_l4_csum_replace(skb, offset, from, to,
+            if IPPROTO_UDP ==ip_proto{
+              let ret = unsafe{bpf_l4_csum_replace(skb, offset, from, to,
                 (BPF_F_MARK_MANGLED_0 |BPF_F_PSEUDO_HDR | 4).into())};
 
                 if ret != 0{
                     error!(&ctx, "l4 csum replace err:{}",ret );
                     return Err(TC_ACT_OK);
                 }
+            
+            }
+          
             // Update the checksum using bpf_l3_csum_replace
            
     let offset = (ETH_HDR_LEN + offset_of!(Ipv4Hdr, check)) as u32;
