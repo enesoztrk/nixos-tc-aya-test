@@ -5,15 +5,18 @@ use core::mem;
 
 use aya_ebpf::{
     bindings::*,
-    macros::{classifier, map},
+    macros::{classifier, map,tracepoint},
     maps::{PerCpuArray, RingBuf,HashMap},
-    programs::TcContext,
+    programs::{TcContext,TracePointContext},
 };
+
+
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{Ipv4Hdr},
     udp::UdpHdr,
-    icmp::IcmpHdr
+    icmp::IcmpHdr,
+    tcp::TcpHdr
 };
 
 use network_types::*;
@@ -22,21 +25,182 @@ use memoffset::offset_of;
 use core::net::Ipv4Addr;
 
 use aya_ebpf::bpf_printk;
-use aya_ebpf::helpers::{bpf_redirect, bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace,bpf_l4_csum_replace};
-
+use aya_ebpf::helpers::{bpf_redirect,
+     bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace,bpf_l4_csum_replace,bpf_skc_lookup_tcp, bpf_sk_release,bpf_sk_fullsock,bpf_probe_read_kernel};
+use aya_ebpf::cty::{c_void};
+use crate::mem::zeroed;
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 mod bindings;
 
-use bindings::{ethhdr, iphdr, ipv6hdr};
-
-
+use bindings::{ethhdr, iphdr, ipv6hdr, __u32, __u8, __u16};
+use aya_ebpf::EbpfContext;
+//[root@nixos:/sys/kernel/debug/tracing/events/sock/inet_sock_set_state]# cat format 
+#[repr(C)]
+struct InetSockSetState {
+    common_type: u16,
+    common_flags: u8,
+    common_preempt_count: u8,
+    common_pid: i32,
+    skaddr: *const core::ffi::c_void,
+    oldstate: i32,
+    newstate: i32,
+    sport: u16,
+    dport: u16,
+    family: u16,
+    protocol: u16,
+    saddr: [u8; 4],
+    daddr: [u8; 4],
+    saddr_v6: [u8; 16],
+    daddr_v6: [u8; 16],
+}
 //#[map]
 //static DATA: RingBuf = RingBuf::with_max_entries(256 * 1024, 0); // 256 KB
 #[map]
 static BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1000100, 0);
+
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+
+
+#[tracepoint]
+pub fn aya_tracepoint(ctx: TracePointContext) -> u32 {
+    match try_aya_tracepoint(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => match ret.try_into() {
+            Ok(rt) => rt,
+            Err(_) => 1,
+        },
+    }
+}
+
+
+fn try_aya_tracepoint(ctx: TracePointContext) -> Result<u32, i64> {
+    let sock = unsafe {
+        bpf_probe_read_kernel(ctx.as_ptr() as *mut InetSockSetState)?
+    };
+   
+     
+  
+      // Log the relevant information
+      info!(&ctx, "protocol:{} newstate {}, oldstate {}, {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",sock.protocol,
+      state_to_string(sock.newstate), state_to_string(sock.oldstate), sock.saddr[0], sock.saddr[1], sock.saddr[2], sock.saddr[3], sock.sport,sock.daddr[0], sock.daddr[1], sock.daddr[2], sock.daddr[3],  sock.dport);
+    
+    Ok(0)
+
+}
+
+
+
+
+
+
+
+
+
+fn state_to_string(state: i32) -> &'static str {
+    match state {
+        1 => "ESTABLISHED",
+        2 => "SYN_SENT",
+        3 => "SYN_RECV",
+        4 => "FIN_WAIT1",
+        5 => "FIN_WAIT2",
+        6 => "TIME_WAIT",
+        7 => "CLOSE",
+        8 => "CLOSE_WAIT",
+        9 => "LAST_ACK",
+        10 => "LISTEN",
+        11 => "CLOSING",
+        12 => "NEW_SYN_RECV",
+        13 => "BOUND_INACTIVE",
+        _ => "UNKNOWN",
+    }
+}
+
+
+#[classifier]
+pub fn tc_conntrack(ctx: TcContext) -> i32 {
+    match try_tc_conntrack(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_tc_conntrack(mut ctx: TcContext) -> Result<i32, i32>{
+
+    let ethhdr: EthHdr = ctx
+    .load::<EthHdr>(0)
+    .map_err(|_| TC_ACT_OK)?;
+
+
+   // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    match ethhdr.ether_type {
+        EtherType::Ipv4 => {}
+        _ => return Ok(TC_ACT_PIPE),
+    }
+
+    //info!(&ctx, "enp0s8-Incoming ICMP packet {:i} -> {:i}", source,dest);
+    let ip_proto = ctx
+    .load::<u8>(ETH_HDR_LEN + offset_of!(iphdr, protocol))
+    .map_err(|_| TC_ACT_OK)?;
+
+
+    if ip_proto == IPPROTO_TCP{
+        let ipv4hdr: Ipv4Hdr = ctx
+        .load::<Ipv4Hdr>(EthHdr::LEN)
+        .map_err(|_| TC_ACT_OK)?;
+
+        let tcphdr: TcpHdr = ctx
+        .load::<TcpHdr>(EthHdr::LEN + Ipv4Hdr::LEN)
+        .map_err(|_| TC_ACT_OK)?;
+    
+   // Prepare the socket tuple
+   let mut tuple = bpf_sock_tuple {
+    __bindgen_anon_1: bpf_sock_tuple__bindgen_ty_1 {
+        ipv4: bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1 {
+            saddr:  ipv4hdr.src_addr,
+            daddr:  ipv4hdr.dst_addr,
+            sport:  tcphdr.source,
+            dport: tcphdr.dest,
+        },
+    },
+};
+let tuple_size = mem::size_of::<bpf_sock_tuple>();
+let skb = ctx.skb.skb;
+
+
+  // Perform the socket lookup
+ /*  let sk = unsafe {
+    bpf_skc_lookup_tcp(
+        skb as *mut _,
+         &mut tuple as *mut _,
+        tuple_size as u32,
+        0,
+        0,
+    ) as *mut c_void
+};
+//info!(&ctx, "in-{:i} :{} -> {:i}:{}", u32::from_be(ipv4hdr.src_addr),  u16::from_be(tcphdr.source),  u32::from_be(ipv4hdr.dst_addr), u16::from_be(tcphdr.dest));
+
+if !sk.is_null(){
+    let sk_state = unsafe { (*(sk as *const bpf_sock)).state };
+    info!(&ctx, "{:i} :{} -> {:i}:{},{}", u32::from_be(ipv4hdr.src_addr),  u16::from_be(tcphdr.source), 
+    u32::from_be(ipv4hdr.dst_addr), u16::from_be(tcphdr.dest),state_to_string(sk_state));
+    unsafe {  bpf_sk_release(sk)};
+
+} */
+
+
+    }
+
+    Ok(TC_ACT_PIPE)
+}
+
+
+
+
+
 
 
 // Helper function to check if two IPs are in the same network

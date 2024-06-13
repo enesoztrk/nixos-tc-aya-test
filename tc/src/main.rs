@@ -1,5 +1,5 @@
 use aya::programs::tc::TcOptions;
-use aya::programs::{tc, SchedClassifier, TcAttachType};
+use aya::programs::{tc, SchedClassifier, TcAttachType,TracePoint};
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
 use clap::Parser;
@@ -130,12 +130,12 @@ async fn main() -> Result<(), anyhow::Error> {
    // let program: &mut SchedClassifier = bpf.program_mut("tc").unwrap().try_into()?;
    //let program: &mut SchedClassifier = bpf.program_mut("tc_ringbuf").unwrap().try_into()?;
  // Load "tc_hashmap" program
- load_tc_program(&mut bpf,"tc_hashmap",&opt.iface,TcAttachType::Ingress)?;
-
+ //load_tc_program(&mut bpf,"tc_hashmap",&opt.iface,TcAttachType::Ingress)?;
+ load_tc_program(&mut bpf,"tc_conntrack",&opt.iface,TcAttachType::Ingress)?;
  // Load "tc_test" program
  //load_tc_program(&mut bpf,"tc_test",&opt.iface_2,TcAttachType::Ingress)?;
  
- load_tc_program(&mut bpf,"tc_masquerade",&opt.iface,TcAttachType::Egress)?;
+ //load_tc_program(&mut bpf,"tc_masquerade",&opt.iface,TcAttachType::Egress)?;
 
    /*  #[cfg(feature = "ingress")]
     program.attach(&opt.iface, TcAttachType::Ingress)?;
@@ -143,7 +143,10 @@ async fn main() -> Result<(), anyhow::Error> {
     program.attach(&opt.iface, TcAttachType::Egress)?;
 */
 
-
+ // Load and attach Tracepoint program
+ let trace_prog: &mut TracePoint = bpf.program_mut("aya_tracepoint").unwrap().try_into()?;
+ trace_prog.load()?;
+ trace_prog.attach("sock", "inet_sock_set_state")?;
 
    /*  #[cfg(all(feature = "block_ip", feature = "ingress"))]
     let _ = block_ip_ingress(& mut bpf,&opt.file);
