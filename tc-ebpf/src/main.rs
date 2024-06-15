@@ -1,3 +1,34 @@
+/*
+* tcp new connection 
+- tcph.syn && !tcph.ack
+
+* udp stateful
+
+UDP sessions are created with basic two way connectivity verification.
+Upon receiving the first packet that does not match a connection, the src/dst IP, 
+and protocol are inspected and the session is created in a limited state. 
+This state has a shortened conn-track timer in which it waits for a response to be seen before the connection 
+is considered established. These timers are much shorter 
+due to the lack of connection state and always timeout opposed to TCP where the FIN can close the sessions.
+
+Summary:
+
+UDP packet --> create session --> start connection timer (10s) --> forward
+
+UDP packet response --> match connection --> mark established --> start connection timer (3m) --> forward
+
+I should probably add that typically it's also required the firewall
+ inspects protocol payloads for what's considered related connection else many protocols would lose functionality.
+
+For example with ICMP or UDP ping, if an error response is seen within the path, the response 
+is not coming from the end point and the src/dst in the headers would not match the connection. 
+So many firewall inspect the protocol payload that contain the original header information such as ICMP.
+This results in a related match and can be forward.
+
+
+*/
+
+
 #![no_std]
 #![no_main]
 
