@@ -26,6 +26,11 @@ So many firewall inspect the protocol payload that contain the original header i
 This results in a related match and can be forward.
 
 
+Concurancy
+
+__sync_fetch_and_add(&val->packets, 1); in rust core::sync::atomic::atomic_add
+bpf_spin_lock
+
 */
 
 
