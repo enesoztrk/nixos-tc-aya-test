@@ -42,7 +42,7 @@ use core::mem;
 use aya_ebpf::{
     bindings::*,
     macros::{classifier, map,tracepoint},
-    maps::{PerCpuArray, RingBuf,HashMap},
+    maps::{Array, HashMap, PerCpuArray, PerCpuHashMap, RingBuf},
     programs::{TcContext,TracePointContext},
 };
 
@@ -73,6 +73,7 @@ mod bindings;
 
 use bindings::{ethhdr, iphdr, ipv6hdr, __u32, __u8, __u16};
 use aya_ebpf::EbpfContext;
+
 //[root@nixos:/sys/kernel/debug/tracing/events/sock/inet_sock_set_state]# cat format 
 #[repr(C)]
 struct InetSockSetState {
@@ -99,6 +100,111 @@ static BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1000100, 0);
 
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
+
+
+
+#[repr(C)]
+struct StaticFlowIngressKey {
+    src_ip:u32,
+    //dest_ip:u32, -> dest ip kendi ipmiz
+    //protocol:u8,
+    src_port:u16,
+    dest_port:u16,
+}
+
+#[repr(C)]
+struct FlowIngressKey {
+    src_ip:u32,
+    dest_ip:u32,
+    protocol:u8,
+    src_port:u16,
+    dest_port:u16,
+}
+
+#[repr(C)]
+struct FlowValue {
+    packet_count:u64,
+    byte_count:u64,
+    last_seen:u64, 
+    conn_state:i32
+}
+
+
+
+
+
+#[map]
+pub static ingress_conntrack: PerCpuHashMap<FlowIngressKey, FlowValue> = PerCpuHashMap::with_max_entries(2048, 0);//array indexi protocol numarasını temsil eder.
+
+
+
+#[map]
+static static_tcp_rules: HashMap<StaticFlowIngressKey, u8> = HashMap::with_max_entries(1024, 0);
+
+#[map]
+static static_udp_rules: HashMap<StaticFlowIngressKey, u8> = HashMap::with_max_entries(1024, 0);
+
+
+#[map]
+static rule_tcp_masks: Array<u8> = Array::with_max_entries(8, 0);
+
+#[map]
+static rule_udp_masks: Array<u8> = Array::with_max_entries(8, 0);
+
+
+//non tcp/udp static rules
+//ICMP,IPv4,RDP,IRTP,IPv6,
+//ARP de ipv4,ipv6 yok düşün bu durumu
+//0-255 -> standard protocols
+//256 -> arp
+//it shows whether the protocol is allowed
+static rule_other_proto_allowed: Array<bool> = Array::with_max_entries(257, 0);
+
+#[repr(C)]
+struct OtherProtoFlowIngressKey {
+    src_ip:u32,
+    protocol:u16,
+}
+
+#[repr(C)]
+struct OtherProtoFlowValue {
+    packet_count:u64,
+    byte_count:u64,
+    last_seen:u64, 
+}
+//other protocols map and statistics
+#[map]
+static other_proto_conn_map: HashMap<OtherProtoFlowIngressKey, OtherProtoFlowValue> = HashMap::with_max_entries(1024, 0);
+
+
+
+fn is_rate_limiting_ok(conn:&FlowIngressKey) ->bool{
+    true
+}
+
+fn is_static_rules_allowed(rules: &FlowIngressKey,conn:&FlowIngressKey) -> bool{
+
+
+    true
+}
+
+
+fn ingress_filter()-> i32{
+    let rules:FlowIngressKey=FlowIngressKey{dest_port:0,src_port:0,protocol:0,src_ip:0}; //hashmap olmalı
+
+    //parse packet
+    let parsed_packet:FlowIngressKey=FlowIngressKey{dest_port:0,src_port:0,protocol:0,src_ip:0};
+    
+    if is_static_rules_allowed(&rules, &parsed_packet) {
+
+            //dynamic rules - conntrack, rate limiting, attack analysis
+         
+                    
+
+    }
+    
+    TC_ACT_SHOT
+}
 
 
 #[tracepoint]
