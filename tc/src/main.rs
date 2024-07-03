@@ -132,6 +132,8 @@ async fn main() -> Result<(), anyhow::Error> {
  // Load "tc_hashmap" program
  //load_tc_program(&mut bpf,"tc_hashmap",&opt.iface,TcAttachType::Ingress)?;
  load_tc_program(&mut bpf,"tc_conntrack",&opt.iface,TcAttachType::Ingress)?;
+ load_tc_program(&mut bpf,"tc_egress_conntrack",&opt.iface,TcAttachType::Egress)?;
+
  // Load "tc_test" program
  //load_tc_program(&mut bpf,"tc_test",&opt.iface_2,TcAttachType::Ingress)?;
  
@@ -147,6 +149,11 @@ async fn main() -> Result<(), anyhow::Error> {
  let trace_prog: &mut TracePoint = bpf.program_mut("aya_tracepoint").unwrap().try_into()?;
  trace_prog.load()?;
  trace_prog.attach("sock", "inet_sock_set_state")?;
+
+
+ let trace_prog_bind: &mut TracePoint = bpf.program_mut("aya_tracepoint_bind").unwrap().try_into()?;
+ trace_prog_bind.load()?;
+ trace_prog_bind.attach("syscalls", "sys_enter_bind")?;
 
    /*  #[cfg(all(feature = "block_ip", feature = "ingress"))]
     let _ = block_ip_ingress(& mut bpf,&opt.file);

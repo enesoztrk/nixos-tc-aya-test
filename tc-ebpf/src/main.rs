@@ -56,13 +56,13 @@ use network_types::{
 };
 
 use network_types::*;
-use aya_log_ebpf::{info,error};
+use aya_log_ebpf::{info,error,warn};
 use memoffset::offset_of;
 use core::net::Ipv4Addr;
 
 use aya_ebpf::bpf_printk;
 use aya_ebpf::helpers::{bpf_redirect,
-     bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace,bpf_l4_csum_replace,bpf_skc_lookup_tcp, bpf_sk_release,bpf_sk_fullsock,bpf_probe_read_kernel};
+     bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace,bpf_l4_csum_replace,bpf_skc_lookup_tcp, bpf_sk_release,bpf_sk_fullsock,bpf_probe_read_kernel,bpf_probe_read_user};
 use aya_ebpf::cty::{c_void};
 use crate::mem::zeroed;
 #[allow(non_upper_case_globals)]
@@ -81,7 +81,7 @@ struct InetSockSetState {
     common_flags: u8,
     common_preempt_count: u8,
     common_pid: i32,
-    skaddr: *const core::ffi::c_void,
+    skaddr: u64,//*const core::ffi::c_void,
     oldstate: i32,
     newstate: i32,
     sport: u16,
@@ -93,6 +93,30 @@ struct InetSockSetState {
     saddr_v6: [u8; 16],
     daddr_v6: [u8; 16],
 }
+
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct sockaddr_in {
+    pub sin_family: u16,
+    pub sin_port: u16,
+    pub sin_addr: u32, // Assuming IPv4 address in Network Byte Order
+    pub sin_zero: [u8; 8], // Padding to match struct sockaddr
+}
+
+#[repr(C)]
+#[repr(packed)]
+struct SysEnterBind {
+    common_type: u16,
+    common_flags: u8,
+    common_preempt_count: u8,
+    common_pid: i32,
+    __syscall_nr: i32,
+    fd: u64,
+    umyaddr: *const sockaddr,
+    addrlen: u64,
+}
+
 //#[map]
 //static DATA: RingBuf = RingBuf::with_max_entries(256 * 1024, 0); // 256 KB
 #[map]
@@ -131,8 +155,6 @@ struct FlowValue {
 
 
 
-
-
 #[map]
 pub static ingress_conntrack: PerCpuHashMap<FlowIngressKey, FlowValue> = PerCpuHashMap::with_max_entries(2048, 0);//array indexi protocol numarasını temsil eder.
 
@@ -159,10 +181,16 @@ static rule_udp_masks: Array<u8> = Array::with_max_entries(8, 0);
 //256 -> arp
 //it shows whether the protocol is allowed
 static rule_other_proto_allowed: Array<bool> = Array::with_max_entries(257, 0);
+#[repr(C)]
+union IpAddress {
+    v4: u32,
+    v6: [u8; 16],
+}
 
 #[repr(C)]
 struct OtherProtoFlowIngressKey {
-    src_ip:u32,
+    src_ip:IpAddress,
+    src_ip_type: u8, // 0 for IPv4, 1 for IPv6
     protocol:u16,
 }
 
@@ -189,7 +217,7 @@ fn is_static_rules_allowed(rules: &FlowIngressKey,conn:&FlowIngressKey) -> bool{
 }
 
 
-fn ingress_filter()-> i32{
+/*fn ingress_filter()-> i32{
     let rules:FlowIngressKey=FlowIngressKey{dest_port:0,src_port:0,protocol:0,src_ip:0}; //hashmap olmalı
 
     //parse packet
@@ -204,7 +232,7 @@ fn ingress_filter()-> i32{
     }
     
     TC_ACT_SHOT
-}
+}*/
 
 
 #[tracepoint]
@@ -227,14 +255,57 @@ fn try_aya_tracepoint(ctx: TracePointContext) -> Result<u32, i64> {
      
   
       // Log the relevant information
-      info!(&ctx, "protocol:{} newstate {}, oldstate {}, {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",sock.protocol,
+      warn!(&ctx, "skaddr: 0x{:x},protocol:{} newstate {}, oldstate {}, {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",sock.skaddr,sock.protocol,
       state_to_string(sock.newstate), state_to_string(sock.oldstate), sock.saddr[0], sock.saddr[1], sock.saddr[2], sock.saddr[3], sock.sport,sock.daddr[0], sock.daddr[1], sock.daddr[2], sock.daddr[3],  sock.dport);
     
     Ok(0)
 
 }
 
+#[tracepoint]
+pub fn aya_tracepoint_bind(ctx: TracePointContext) -> u32 {
+    match try_aya_tracepoint_bind(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => match ret.try_into() {
+            Ok(rt) => rt,
+            Err(_) => 1,
+        },
+    }
+}
 
+
+fn try_aya_tracepoint_bind(ctx: TracePointContext) -> Result<u32, i64> {
+
+   
+
+    let sockaddr_ptr:*const sockaddr_in = unsafe {ctx.read_at(24)?};
+    let sockaddr_info = unsafe { bpf_probe_read_user(sockaddr_ptr as *const sockaddr_in) }?;
+
+
+
+
+    let fd:u64= unsafe {ctx.read_at(16)?};
+    /*let bind_var = unsafe {
+        bpf_probe_read_kernel(ctx.as_ptr() as *mut SysEnterBind)?
+    };*/
+
+  // Validate umyaddr pointer
+  if sockaddr_ptr.is_null() {
+    return Err(-1); // or handle appropriately
+}
+
+
+    
+  // Access sa_family field through raw pointer
+    // Now you can access fields of sockaddr
+    // Note: Adjust this according to the actual fields of `sockaddr` in your implementation
+//    let sin_family = umyaddr.sa_family;
+
+    // Log the relevant information
+    info!(&ctx,"fd: {},sin_family: {},sin_port: {},sin_addr : {:i}", fd,sockaddr_info.sin_family,u16::from_be(sockaddr_info.sin_port),u32::from_be(sockaddr_info.sin_addr));
+ //info!(&ctx,"fd:{}, sa_family:{}",fd,sockaddr_info.sin_family,);
+    Ok(0)
+}
 
 
 
@@ -259,6 +330,55 @@ fn state_to_string(state: i32) -> &'static str {
         13 => "BOUND_INACTIVE",
         _ => "UNKNOWN",
     }
+}
+
+#[classifier]
+pub fn tc_egress_conntrack(ctx: TcContext) -> i32 {
+    match try_egress_conntrack(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_egress_conntrack(mut ctx: TcContext) -> Result<i32, i32>{
+
+    let ethhdr: EthHdr = ctx
+    .load::<EthHdr>(0)
+    .map_err(|_| TC_ACT_OK)?;
+
+
+   // let ethhdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    match ethhdr.ether_type {
+        EtherType::Ipv4 => {}
+        _ => return Ok(TC_ACT_PIPE),
+    }
+
+    //info!(&ctx, "enp0s8-Incoming ICMP packet {:i} -> {:i}", source,dest);
+    let ip_proto = ctx
+    .load::<u8>(ETH_HDR_LEN + offset_of!(iphdr, protocol))
+    .map_err(|_| TC_ACT_OK)?;
+
+
+    if ip_proto == IPPROTO_TCP{
+        let ipv4hdr: Ipv4Hdr = ctx
+        .load::<Ipv4Hdr>(EthHdr::LEN)
+        .map_err(|_| TC_ACT_OK)?;
+
+        let tcphdr: TcpHdr = ctx
+        .load::<TcpHdr>(EthHdr::LEN + Ipv4Hdr::LEN)
+        .map_err(|_| TC_ACT_OK)?;
+
+    // Convert boolean flags to u16 values
+let syn_u16 = if tcphdr.syn()>0 { 1 } else { 0 };
+let ack_u16 = if tcphdr.ack()>0 { 1 } else { 0 };
+let psh_u16 = if tcphdr.psh()>0 { 1 } else { 0 };
+let rst_u16 = if tcphdr.rst()>0 { 1 } else { 0 };
+let fin_u16 = if tcphdr.fin()>0 { 1 } else { 0 };
+    info!(&ctx, "TCP[OUT],SYN={},ACK={},PSH={},RST={},FIN={} {:i} :{} -> {:i}:{}",syn_u16,ack_u16, psh_u16,rst_u16,fin_u16, u32::from_be(ipv4hdr.src_addr), u16::from_be(tcphdr.source), u32::from_be(ipv4hdr.dst_addr), u16::from_be(tcphdr.dest));
+    
+    }
+
+    Ok(TC_ACT_PIPE)
 }
 
 
@@ -297,7 +417,15 @@ fn try_tc_conntrack(mut ctx: TcContext) -> Result<i32, i32>{
         let tcphdr: TcpHdr = ctx
         .load::<TcpHdr>(EthHdr::LEN + Ipv4Hdr::LEN)
         .map_err(|_| TC_ACT_OK)?;
-    
+
+    // Convert boolean flags to u16 values
+let syn_u16 = if tcphdr.syn()>0 { 1 } else { 0 };
+let ack_u16 = if tcphdr.ack()>0 { 1 } else { 0 };
+let psh_u16 = if tcphdr.psh()>0 { 1 } else { 0 };
+let rst_u16 = if tcphdr.rst()>0 { 1 } else { 0 };
+let fin_u16 = if tcphdr.fin()>0 { 1 } else { 0 };
+    info!(&ctx, "TCP[IN],SYN={},ACK={},PSH={},RST={},FIN={} {:i} :{} -> {:i}:{}",syn_u16,ack_u16, psh_u16,rst_u16,fin_u16, u32::from_be(ipv4hdr.src_addr), u16::from_be(tcphdr.source), u32::from_be(ipv4hdr.dst_addr), u16::from_be(tcphdr.dest));
+
    // Prepare the socket tuple
    let mut tuple = bpf_sock_tuple {
     __bindgen_anon_1: bpf_sock_tuple__bindgen_ty_1 {
