@@ -40,10 +40,7 @@ bpf_spin_lock
 use core::mem;
 
 use aya_ebpf::{
-    bindings::*,
-    macros::{classifier, map,tracepoint},
-    maps::{Array, HashMap, PerCpuArray, PerCpuHashMap, RingBuf},
-    programs::{TcContext,TracePointContext},
+    bindings::*, helpers::bpf_map_lookup_elem, macros::{classifier, map,tracepoint}, maps::{Array, HashMap, PerCpuArray, PerCpuHashMap, RingBuf}, programs::{TcContext,TracePointContext}
 };
 
 
@@ -62,8 +59,10 @@ use core::net::Ipv4Addr;
 
 use aya_ebpf::bpf_printk;
 use aya_ebpf::helpers::{bpf_redirect,
-     bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace,bpf_l4_csum_replace,bpf_skc_lookup_tcp, bpf_sk_release,bpf_sk_fullsock,bpf_probe_read_kernel,bpf_probe_read_user};
+     bpf_sk_redirect_hash,bpf_csum_diff,bpf_l3_csum_replace,bpf_l4_csum_replace,bpf_skc_lookup_tcp, bpf_sk_release,bpf_sk_fullsock,bpf_map_lookup_percpu_elem,bpf_probe_read_kernel,bpf_probe_read_user,bpf_get_current_pid_tgid};
 use aya_ebpf::cty::{c_void};
+use aya_ebpf::cty::{c_int, c_short, c_uchar,c_long};
+
 use crate::mem::zeroed;
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
@@ -117,6 +116,30 @@ struct SysEnterBind {
     addrlen: u64,
 }
 
+
+
+#[repr(C)]
+struct SysEnterSocket {
+    common_type: c_short,               // unsigned short
+    common_flags: c_uchar,              // unsigned char
+    common_preempt_count: c_uchar,      // unsigned char
+    common_pid: c_int,                  // int
+
+    __syscall_nr: c_int,                // int
+    family: i64,                        // int (8 bytes)
+    socket_type: i64,                   // int (8 bytes)
+    protocol: i64,                      // int (8 bytes)
+}
+#[repr(C)]
+struct SysExitSocket {
+    common_type: c_short,               // unsigned short
+    common_flags: c_uchar,              // unsigned char
+    common_preempt_count: c_uchar,      // unsigned char
+    common_pid: c_int,                  // int
+
+    __syscall_nr: c_int,                // int
+    ret: c_long,                        // long (8 bytes)
+}
 //#[map]
 //static DATA: RingBuf = RingBuf::with_max_entries(256 * 1024, 0); // 256 KB
 #[map]
@@ -152,6 +175,19 @@ struct FlowValue {
     last_seen:u64, 
     conn_state:i32
 }
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct UdpServerInfo {
+    pid: u32,
+    ip: u32,
+    port: u16,
+}
+
+
+#[map]
+pub static udp_servers: PerCpuHashMap<UdpServerInfo, u32> = PerCpuHashMap::with_max_entries(1024, 0);
+
 
 
 
@@ -276,11 +312,11 @@ pub fn aya_tracepoint_bind(ctx: TracePointContext) -> u32 {
 
 fn try_aya_tracepoint_bind(ctx: TracePointContext) -> Result<u32, i64> {
 
-   
+    let pid = bpf_get_current_pid_tgid() as u32;
 
     let sockaddr_ptr:*const sockaddr_in = unsafe {ctx.read_at(24)?};
     let sockaddr_info = unsafe { bpf_probe_read_user(sockaddr_ptr as *const sockaddr_in) }?;
-
+    let common_pid:i32 = unsafe {ctx.read_at(4)?};
 
 
 
@@ -300,16 +336,118 @@ fn try_aya_tracepoint_bind(ctx: TracePointContext) -> Result<u32, i64> {
     // Now you can access fields of sockaddr
     // Note: Adjust this according to the actual fields of `sockaddr` in your implementation
 //    let sin_family = umyaddr.sa_family;
-
+    let key = UdpServerInfo{pid:1,ip:0,port:5002};
     // Log the relevant information
-    info!(&ctx,"fd: {},sin_family: {},sin_port: {},sin_addr : {:i}", fd,sockaddr_info.sin_family,u16::from_be(sockaddr_info.sin_port),u32::from_be(sockaddr_info.sin_addr));
+    let map_ptr: *mut c_void = &udp_servers as *const _ as *mut c_void;
+    let key_ptr: *const c_void = &key as *const _ as *const c_void;
+
+    info!(&ctx,"[Sock_bind]pid: {}, fd: {},sin_family: {},sin_port: {},sin_addr : {:i}",pid,fd,sockaddr_info.sin_family,u16::from_be(sockaddr_info.sin_port),u32::from_be(sockaddr_info.sin_addr));
+      // Loop through possible CPU IDs
+    
+ // Perform the map lookup
+ unsafe {
+    let result = bpf_map_lookup_elem(map_ptr, key_ptr);
+    if result.is_null() {
+        // Handle when the element is not found in the map
+        // For example:
+        // return Err(-1);
+        warn!(&ctx,"element not found");
+    } else {
+        // Use the result pointer as needed
+           // Cast the result pointer to the appropriate type
+           let value_ptr: *const u32 = result as *const u32;
+           let value = *value_ptr;
+           info!(
+               &ctx,
+               "Found value {} for key: pid={}, ip={}, port={}",
+               value, key.pid, key.ip, key.port
+           );
+    }
+}
+   
+ 
  //info!(&ctx,"fd:{}, sa_family:{}",fd,sockaddr_info.sin_family,);
     Ok(0)
 }
 
 
+#[tracepoint]
+pub fn aya_tracepoint_socket_enter(ctx: TracePointContext) -> u32 {
+    match try_aya_tracepoint_socket_enter(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => match ret.try_into() {
+            Ok(rt) => rt,
+            Err(_) => 1,
+        },
+    }
+}
 
 
+fn try_aya_tracepoint_socket_enter(ctx: TracePointContext) -> Result<u32, i64> {
+
+    let pid = bpf_get_current_pid_tgid() as u32;
+
+
+    let sock_enter = unsafe {
+        bpf_probe_read_kernel(ctx.as_ptr() as *mut SysEnterSocket)?
+    };
+   
+    // Log the relevant information
+    info!(&ctx,"[Sock_enter]pid: {},family:{},type:{},proto:{}",pid,sock_enter.family,sock_enter.socket_type,sock_enter.protocol);
+ //info!(&ctx,"fd:{}, sa_family:{}",fd,sockaddr_info.sin_family,);
+    Ok(0)
+}
+
+#[tracepoint]
+pub fn aya_tracepoint_socket_exit(ctx: TracePointContext) -> u32 {
+    match try_aya_tracepoint_socket_exit(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => match ret.try_into() {
+            Ok(rt) => rt,
+            Err(_) => 1,
+        },
+    }
+}
+
+
+fn try_aya_tracepoint_socket_exit(ctx: TracePointContext) -> Result<u32, i64> {
+
+    let pid = bpf_get_current_pid_tgid() as u32;
+
+    let sock_exit = unsafe {
+        bpf_probe_read_kernel(ctx.as_ptr() as *mut SysExitSocket)?
+    };
+   
+    // Log the relevant information
+    info!(&ctx,"[Sock_exit]pid: {},ret_val:{}", pid,sock_exit.ret);
+ //info!(&ctx,"fd:{}, sa_family:{}",fd,sockaddr_info.sin_family,);
+    Ok(0)
+}
+
+
+#[tracepoint]
+pub fn aya_tracepoint_recvfrom_enter(ctx: TracePointContext) -> u32 {
+    match try_aya_tracepoint_recvfrom_enter(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => match ret.try_into() {
+            Ok(rt) => rt,
+            Err(_) => 1,
+        },
+    }
+}
+
+
+fn try_aya_tracepoint_recvfrom_enter(ctx: TracePointContext) -> Result<u32, i64> {
+
+    let pid = bpf_get_current_pid_tgid() as u32;
+
+    let fd:u64= unsafe {ctx.read_at(16)?};
+   
+    // Log the relevant information
+    info!(&ctx,"[Recvfrom_enter]pid: {}, fd: {}", pid,fd);
+ //info!(&ctx,"fd:{}, sa_family:{}",fd,sockaddr_info.sin_family,);
+    Ok(0)
+}
 
 
 

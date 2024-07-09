@@ -6,11 +6,18 @@ use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
 use simplelog::{ColorChoice, ConfigBuilder, LevelFilter, TermLogger, TerminalMode};
+use netstat::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo};
 use aya::maps::RingBuf;
+use aya::Pod;
 use std::net::Ipv4Addr;
-use aya::maps::HashMap;
+use aya::maps::{HashMap,PerCpuHashMap,PerCpuValues,MapData};
+use aya::util::nr_cpus;
+use tokio::time::Duration;
+use tokio::time;
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet;
 #[derive(Debug, Parser)]
 struct Opt {
     #[clap(long, default_value = "enp0s3")]
@@ -24,9 +31,15 @@ struct Opt {
 }
 
 
+#[derive(Debug, Clone, Copy,Hash,Eq,PartialEq,)]
+#[repr(C)]
+struct UdpServerInfo {
+    pid: u32,
+    ip: u32,
+    port: u16,
+}
 
-
-
+unsafe impl Pod for UdpServerInfo {}
 
 fn block_ip_ingress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error>  {
     info!("block_ip_ingress");
@@ -76,6 +89,22 @@ fn block_ip_egress(bpf: &mut Bpf, file_path: &str) -> Result<(), anyhow::Error> 
 
     Ok(())
 }
+
+fn create_udp_servers(bpf: &mut Bpf) -> Result<PerCpuHashMap<&mut MapData, UdpServerInfo, u32>, anyhow::Error>  {
+   
+    info!("udp_servers");
+    let mut udp_servers: PerCpuHashMap<_, UdpServerInfo, u32> =
+    PerCpuHashMap::try_from(bpf.map_mut("udp_servers").unwrap())?;
+    
+    udp_servers.insert(
+      UdpServerInfo{  pid: 123,
+            ip: 0xC0A80101, // Example IPv4 address 192.168.1.1
+            port: 8080,},
+            PerCpuValues::try_from(vec![3u32; nr_cpus()?])?,
+            0);
+    Ok(udp_servers)
+}
+
 
 // Function to load the "tc_hashmap" program
 fn load_tc_program(bpf: &mut Bpf,program_name:&str,if_name:&str,attach_type:TcAttachType) -> Result<(), anyhow::Error> {
@@ -145,15 +174,37 @@ async fn main() -> Result<(), anyhow::Error> {
     program.attach(&opt.iface, TcAttachType::Egress)?;
 */
 
+
+
+let udp_servers_key =  UdpServerInfo{  pid: 123,
+    ip: 0xC0A80101, // Example IPv4 address 192.168.1.1
+    port: 8080};
+
  // Load and attach Tracepoint program
- let trace_prog: &mut TracePoint = bpf.program_mut("aya_tracepoint").unwrap().try_into()?;
+ /*let trace_prog: &mut TracePoint = bpf.program_mut("aya_tracepoint").unwrap().try_into()?;
  trace_prog.load()?;
  trace_prog.attach("sock", "inet_sock_set_state")?;
-
-
- let trace_prog_bind: &mut TracePoint = bpf.program_mut("aya_tracepoint_bind").unwrap().try_into()?;
+*/
+let trace_prog_bind: &mut TracePoint = bpf.program_mut("aya_tracepoint_bind").unwrap().try_into()?;
  trace_prog_bind.load()?;
  trace_prog_bind.attach("syscalls", "sys_enter_bind")?;
+
+ /*
+ let trace_prog_sock_enter: &mut TracePoint = bpf.program_mut("aya_tracepoint_socket_enter").unwrap().try_into()?;
+ trace_prog_sock_enter.load()?;
+ trace_prog_sock_enter.attach("syscalls", "sys_enter_socket")?;
+
+ let trace_prog_sock_exit: &mut TracePoint = bpf.program_mut("aya_tracepoint_socket_exit").unwrap().try_into()?;
+ trace_prog_sock_exit.load()?;
+ trace_prog_sock_exit.attach("syscalls", "sys_exit_socket")?;
+
+
+
+ let trace_prog_recvfrom_enter: &mut TracePoint = bpf.program_mut("aya_tracepoint_recvfrom_enter").unwrap().try_into()?;
+ trace_prog_recvfrom_enter.load()?;
+ trace_prog_recvfrom_enter.attach("syscalls", "sys_enter_recvfrom")?;
+
+ */
 
    /*  #[cfg(all(feature = "block_ip", feature = "ingress"))]
     let _ = block_ip_ingress(& mut bpf,&opt.file);
@@ -161,10 +212,81 @@ async fn main() -> Result<(), anyhow::Error> {
     #[cfg(all(feature = "block_ip", feature = "egress"))]
     let _ = block_ip_egress(&mut bpf,&opt.file);
 */
+let mut udp_serv=create_udp_servers(&mut bpf).unwrap();
 
+let retval=udp_serv.get( &udp_servers_key, 0);
+
+info!("udp_Servers got:{:?},{:?}",udp_servers_key,retval);
+
+let mut current_active_udp_servers:StdHashMap<UdpServerInfo, u32>=Default::default(); 
+    loop {
+        time::sleep(Duration::from_secs(5)).await; // Update every 60 seconds
+
+        let active_udp_servers = match get_udp_servers() {
+            Ok(servers) => servers,
+            Err(e) => {
+                warn!("Error updating active UDP servers: {}", e);
+                continue; // Handle error gracefully
+            }
+        };
+
+        info!("Active UDP Servers:");
+       /*  for (server_info,val) in &active_udp_servers {
+            info!("IP: {}, Port: {}, Info: {}", Ipv4Addr::from(server_info.ip), server_info.port, val); // Print each server in human-readable format
+        } */
+     // Compare current_active_udp_servers and active_udp_servers
+        let current_set: HashSet<_> = current_active_udp_servers.keys().collect();
+        let new_set: HashSet<_> = active_udp_servers.keys().collect();
+
+        let to_delete: Vec<_> = current_set.difference(&new_set).cloned().collect();
+        let to_add: Vec<_> = new_set.difference(&current_set).cloned().collect();
+
+        
+        for server_info in to_delete {
+            udp_serv.remove(&server_info).unwrap_or_else(|e| {
+                warn!("Failed to delete server info {:?}: {}", server_info, e);
+            });
+        }
+
+        for server_info in to_add {
+            udp_serv.insert(server_info.clone(), PerCpuValues::try_from(vec![3u32; nr_cpus()?])?,0).unwrap_or_else(|e| {
+                warn!("Failed to insert server info {:?}: {}", server_info, e);
+            });
+        }
+
+       // info!("To delete: {:?}", to_delete);
+       // info!("To add: {:?}", to_add);
+
+        // Update the current active UDP servers
+        current_active_udp_servers = active_udp_servers;
+     }
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
     info!("Exiting...");
 
     Ok(())
+}
+
+
+
+fn get_udp_servers() -> Result<StdHashMap<UdpServerInfo, u32>, Box<dyn std::error::Error>> {
+    let af_flags = AddressFamilyFlags::IPV4;
+    let proto_flags = ProtocolFlags::UDP;
+    let mut udp_servers = StdHashMap::new();
+
+    let sockets = get_sockets_info(af_flags, proto_flags)?;
+    for socket in sockets {
+        if let ProtocolSocketInfo::Udp(info) = socket.protocol_socket_info {
+            if let std::net::IpAddr::V4(local_addr) = info.local_addr {
+                let server_info = UdpServerInfo {
+                    pid: 1, // Replace with actual PID if available
+                    ip: u32::from(local_addr),
+                    port: info.local_port,
+                };
+                udp_servers.insert(server_info, 1);
+            }
+        }
+    }
+
+    Ok(udp_servers)
 }
